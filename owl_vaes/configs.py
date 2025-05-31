@@ -21,6 +21,10 @@ class VAEConfig:
     codebook_size : int = 1024
     codebook_dim : int = 8
 
+    # For proxy
+    proxy_size : int = 16
+    proxy_channels : int = 16
+
 @dataclass
 class ResNetConfig(VAEConfig):
     ch_0 : int = 256
@@ -40,6 +44,9 @@ class TransformerConfig(VAEConfig):
     patch_size : int = 1
     causal: bool = False
     mimetic_init: bool = True
+
+    # Proxy stuff
+    proxy_patch_size : int = 1
 
 @dataclass
 class TrainingConfig:
@@ -76,6 +83,9 @@ class TrainingConfig:
 
     # Causal regularization
     warmup_crt:int = 1000
+
+    # For distillation, if you want to renormalize latents, scale by this amount before decode
+    latent_scale:float = 1.0
 
 @dataclass
 class WANDBConfig:

@@ -16,12 +16,9 @@ from ..muon import init_muon
 from ..nn.lpips import VGGLPIPS
 from ..schedulers import get_scheduler_cls
 from ..utils import Timer, freeze, unfreeze, versatile_load
-from ..utils.get_device import DeviceManager
 from ..utils.logging import LogHelper, to_wandb
 from .base import BaseTrainer
 from ..configs import Config
-
-device = DeviceManager.get_device()
 
 def latent_reg_loss(z):
     # z is [b,c,h,w]
@@ -29,7 +26,7 @@ def latent_reg_loss(z):
     loss = eo.reduce(loss, 'b ... -> b', reduction = 'sum').mean()
     return 0.5 * loss
 
-class DecTunerainer(BaseTrainer):
+class DecTuneTrainer(BaseTrainer):
     """
     Trainer for only the decoder, with frozen encoder.
     Does L2 + LPIPS + GAN
@@ -45,7 +42,7 @@ class DecTunerainer(BaseTrainer):
         super().__init__(*args,**kwargs)
 
         teacher_ckpt_path = self.train_cfg.teacher_ckpt
-        teacher_cfg_path = self.train_cfg.teacher_cfg_path
+        teacher_cfg_path = self.train_cfg.teacher_cfg
 
         teacher_ckpt = versatile_load(teacher_ckpt_path)
         teacher_cfg = Config.from_yaml(teacher_cfg_path).model
@@ -61,8 +58,8 @@ class DecTunerainer(BaseTrainer):
         del model.encoder
         self.model = model.decoder
 
-        disc_cfg = self.model_cfg.disc_cfg
-        self.discriminator = get_model_cls(disc_cfg.model_id)(disc_cfg)
+        disc_cfg = self.model_cfg.discriminator
+        self.discriminator = get_discriminator_cls(disc_cfg.model_id)(disc_cfg)
 
         if self.rank == 0:
             model_params = sum(p.numel() for p in self.model.parameters())
@@ -107,26 +104,28 @@ class DecTunerainer(BaseTrainer):
         self.total_step_counter = save_dict['steps']
 
     def train(self):
+        torch.cuda.set_device(self.local_rank)
+
         # Loss weights
         lpips_weight = self.train_cfg.loss_weights.get('lpips', 0.0)
         gan_weight = self.train_cfg.loss_weights.get('gan', 0.1)
 
         # Prepare model, lpips, ema
-        self.model = self.model.to(device).train()
+        self.model = self.model.cuda().train()
         if self.world_size > 1:
             self.model = DDP(self.model)
         
-        self.discriminator = self.discriminator.to(device).train()
+        self.discriminator = self.discriminator.cuda().train()
         if self.world_size > 1:
             self.discriminator = DDP(self.discriminator)
         freeze(self.discriminator)
 
         lpips = None
         if lpips_weight > 0.0:
-            lpips = VGGLPIPS().to(device).eval()
+            lpips = VGGLPIPS().cuda().eval()
             freeze(lpips)
 
-        self.encoder = self.encoder.to(device).eval()
+        self.encoder = self.encoder.cuda().bfloat16().eval()
         freeze(self.encoder)
 
         #self.encoder = torch.compile(self.encoder)
@@ -142,11 +141,11 @@ class DecTunerainer(BaseTrainer):
         # Set up optimizer and scheduler
         if self.train_cfg.opt.lower() == "muon":
             self.opt = init_muon(self.model, rank=self.rank,world_size=self.world_size,**self.train_cfg.opt_kwargs)
-            self.d_opt = init_muon(self.discriminator, rank=self.rank,world_size=self.world_size,**self.train_cfg.d_opt_kwargs)
+            self.d_opt = init_muon(self.discriminator, rank=self.rank,world_size=self.world_size,**self.train_cfg.opt_kwargs)
         else:
             opt_cls = getattr(torch.optim, self.train_cfg.opt)
             self.opt = opt_cls(self.model.parameters(), **self.train_cfg.opt_kwargs)
-            self.d_opt = opt_cls(self.discriminator.parameters(), **self.train_cfg.d_opt_kwargs)
+            self.d_opt = opt_cls(self.discriminator.parameters(), **self.train_cfg.opt_kwargs)
 
         if self.train_cfg.scheduler is not None:
             self.scheduler = get_scheduler_cls(self.train_cfg.scheduler)(self.opt, **self.train_cfg.scheduler_kwargs)
@@ -156,7 +155,7 @@ class DecTunerainer(BaseTrainer):
         accum_steps = max(1, accum_steps)
 
         self.scaler = torch.amp.GradScaler()
-        ctx = torch.amp.autocast(device, torch.bfloat16)
+        ctx = torch.amp.autocast(f'cuda:{self.local_rank}', torch.bfloat16)
 
         # Timer reset
         timer = Timer()
@@ -181,15 +180,14 @@ class DecTunerainer(BaseTrainer):
         for _ in range(self.train_cfg.epochs):
             for batch in loader:
                 total_loss = 0.
-                batch = batch.to(device).bfloat16()
+                batch = batch.to('cuda').bfloat16()
+
+                with torch.no_grad():
+                    teacher_z = self.encoder(batch) / self.train_cfg.latent_scale
 
                 with ctx:
-                    out = self.model(batch)
-                    if len(out) == 2:
-                        batch_rec, z = out
-                    elif len(out) == 3:
-                        batch_rec, z, down_rec = out
-                
+                    batch_rec = self.model(teacher_z)
+
                 # Discriminator training 
                 unfreeze(self.discriminator)
                 with ctx:
@@ -210,17 +208,12 @@ class DecTunerainer(BaseTrainer):
                 
                 crnt_gan_weight = warmup_gan_weight()
                 if crnt_gan_weight > 0.0:
-                    gan_loss = self.discriminator(batch_rec) / accum_steps
+                    with ctx:
+                        gan_loss = self.discriminator(batch_rec) / accum_steps
                     metrics.log('gan_loss', gan_loss)
                     total_loss += crnt_gan_weight * gan_loss
 
                 self.scaler.scale(total_loss).backward()
-
-                with torch.no_grad():
-                    metrics.log_dict({
-                        'z_std' : z.std() / accum_steps,
-                        'z_shift' : z.mean() / accum_steps
-                    })
 
                 local_step += 1
                 if local_step % accum_steps == 0:
@@ -251,7 +244,8 @@ class DecTunerainer(BaseTrainer):
                         timer.reset()
 
                         if self.total_step_counter % self.train_cfg.sample_interval == 0:
-                            ema_rec = self.ema.ema_model(z)
+                            with ctx:
+                                ema_rec = self.ema.ema_model(teacher_z)
                             wandb_dict['samples'] = to_wandb(
                                 batch.detach().contiguous().bfloat16(),
                                 ema_rec.detach().contiguous().bfloat16(),

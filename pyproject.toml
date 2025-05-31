@@ -32,5 +32,4 @@ dev = [
 ]
 
 [tool.uv.sources]
-muon = { git = "https://github.com/KellerJordan/Muon" }
 lpips = { git = "https://github.com/shahbuland/PerceptualSimilarity" }

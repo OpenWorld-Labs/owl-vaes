@@ -6,11 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from owl_vaes.utils.get_device import DeviceManager
-
 from ..nn.resnet import DownBlock, SameBlock
-
-device = DeviceManager.get_device()
 
 class R3GANDiscriminator(nn.Module):
     def __init__(self, config):
@@ -62,7 +58,7 @@ class R3GANDiscriminator(nn.Module):
 
             return fake_loss + real_loss
 
-if __name__ == "__main__":
+def r3gandiscriminator_test():
     from dataclasses import dataclass
 
     @dataclass
@@ -71,9 +67,14 @@ if __name__ == "__main__":
         ch_0:int= 32
         ch_max:int= 256
         blocks_per_stage:int= 2
-
-    model = ResDiscriminator(DummyConfig()).bfloat16().to(device)
+        
+    model = R3GANDiscriminator(DummyConfig()).bfloat16().cuda()
     with torch.no_grad():
-        x = torch.randn(1,3,256,256).bfloat16().to(device)
+        x = torch.randn(1,3,256,256).bfloat16().cuda()
         y = model._forward(x)
-        print(y.shape)
+        assert y.shape == (1,), f"Expected shape (1,), got {y.shape}"
+    print("Test passed!")
+    
+if __name__ == "__main__":
+    r3gandiscriminator_test()
+
