@@ -61,6 +61,7 @@ class R3GANDiscriminator(nn.Module):
 def r3gandiscriminator_test():
     from dataclasses import dataclass
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     @dataclass
     class DummyConfig:
         sample_size:int= 256
@@ -68,13 +69,12 @@ def r3gandiscriminator_test():
         ch_max:int= 256
         blocks_per_stage:int= 2
         
-    model = R3GANDiscriminator(DummyConfig()).bfloat16().cuda()
+    model = R3GANDiscriminator(DummyConfig()).bfloat16().to(device)
     with torch.no_grad():
-        x = torch.randn(1,3,256,256).bfloat16().cuda()
+        x = torch.randn(1,3,256,256).bfloat16().to(device)
         y = model._forward(x)
         assert y.shape == (1,), f"Expected shape (1,), got {y.shape}"
     print("Test passed!")
-    
+
 if __name__ == "__main__":
     r3gandiscriminator_test()
-

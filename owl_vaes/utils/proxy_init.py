@@ -53,7 +53,8 @@ def load_proxy_model(
     t_cfg.mimetic_init = False
     
     # Initialize combined model
-    model = CombinedModule(t_cfg, r_cfg).cuda().bfloat16()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = CombinedModule(t_cfg, r_cfg).bfloat16().to(device)
     
     # Load checkpoints
     model.load_ckpt(t_ckpt_path, r_ckpt_path)
@@ -68,10 +69,11 @@ def proxy_init_test():
     r_cfg = Config.from_yaml(r_cfg_path).model
 
     t_cfg.mimetic_init = False
-    model = CombinedModule(t_cfg, r_cfg).bfloat16().cuda()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = CombinedModule(t_cfg, r_cfg).bfloat16().to(device)
 
     with torch.no_grad():
-        x = torch.randn(1, 3, 256, 256).bfloat16().cuda()
+        x = torch.randn(1, 3, 256, 256).bfloat16().to(device)
         y = model(x)
         assert y.shape == (1, 3, 256, 256), f"Expected shape (1,3,256,256), got {y.shape}"
 

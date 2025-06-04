@@ -5,8 +5,8 @@ class MLP(nn.Module):
     def __init__(self, config : 'TransformerConfig'):
         super().__init__()
 
-        self.fc1 = nn.Linear(config.d_model, 4 * config.d_model)
-        self.fc2 = nn.Linear(4 * config.d_model, config.d_model)
+        self.fc1 = nn.Linear(config.d_model, 4 * config.d_model, bias=False)
+        self.fc2 = nn.Linear(4 * config.d_model, config.d_model, bias=False)
 
     def forward(self, x):
         x = self.fc1(x)

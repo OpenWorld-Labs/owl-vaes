@@ -90,6 +90,7 @@ class ProxyTiToKVAE(nn.Module):
 
 def proxy_titok_test():
     from ..configs import TransformerConfig
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     cfg = TransformerConfig(
         sample_size = 256,
@@ -105,9 +106,9 @@ def proxy_titok_test():
         proxy_channels = 32
     )
 
-    model = ProxyTiToKVAE(cfg).bfloat16().cuda()
+    model = ProxyTiToKVAE(cfg).bfloat16().to(device)
     with torch.no_grad():
-        x = torch.randn(1, 3, 256, 256).bfloat16().cuda()
+        x = torch.randn(1, 3, 256, 256).bfloat16().to(device)
         rec, z = model(x)
         assert rec.shape == (1, 32, 16, 16), f"Expected shape (1,32,16,16), got {rec.shape}"
         assert z.shape == (1, 16, 128), f"Expected shape (1,16,128), got {z.shape}"

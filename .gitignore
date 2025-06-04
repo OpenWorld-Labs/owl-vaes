@@ -11,3 +11,7 @@ typings/
 *CLAUDE.md
 *cursorrules
 .vscode
+build
+*.egg-info
+torch_compile_debug
+hftmp

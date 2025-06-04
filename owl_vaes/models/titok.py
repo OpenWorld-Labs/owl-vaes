@@ -80,10 +80,11 @@ class TiToKVAE(nn.Module):
         # x is [b,c,h,w]
         z = self.encoder(x) # -> [b,l,d]
 
-        if self.config.noise_decoder_inputs > 0.0:
-            dec_input = z + torch.randn_like(z) * self.config.noise_decoder_inputs
-        else:
-            dec_input = z.clone()
+        dec_input = torch.cond(
+            self.config.noise_decoder_inputs > 0.0,
+            lambda: z + torch.randn_like(z) * self.config.noise_decoder_inputs,
+            lambda: z.clone(),
+        )
 
         rec = self.decoder(dec_input)
 
@@ -91,6 +92,7 @@ class TiToKVAE(nn.Module):
 
 def titok_test():
     from ..configs import TransformerConfig
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     cfg = TransformerConfig(
         sample_size = 16,
@@ -103,9 +105,9 @@ def titok_test():
         patch_size = 1
     )
 
-    model = TiToKVAE(cfg).bfloat16().cuda()
+    model = TiToKVAE(cfg).bfloat16().to(device)
     with torch.no_grad():
-        x = torch.randn(1, 32, 16, 16).bfloat16().cuda()
+        x = torch.randn(1, 32, 16, 16).bfloat16().to(device)
         rec, z = model(x)
         assert rec.shape == (1, 32, 16, 16), f"Expected shape (1,32,16,16), got {rec.shape}"
         assert z.shape == (1, 16, 128), f"Expected shape (1,16,128), got {z.shape}"

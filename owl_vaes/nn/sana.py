@@ -2,9 +2,11 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from einops.layers.torch import Reduce, Rearrange
 import einops as eo
 
 from .attn import Attn
+from .normalization import LayerNorm
 from ..configs import TransformerConfig
 
 """
@@ -18,12 +20,13 @@ class SpaceToChannel(nn.Module):
             self.reps = 4
         else:
             self.reps = 2
+        self.reduce = Reduce('b (reps c) h w -> b c h w', reps = self.reps, reduction = 'mean')
 
     def forward(self, x):
         # [c,2h,2w] -> [4c,h,w]
         x = F.pixel_unshuffle(x, downscale_factor=2)
         # [4c,h,w] -> [2c,h,w]
-        x = eo.reduce(x, 'b (reps c) h w -> b c h w', reps = self.reps, reduction = 'mean')
+        x = self.reduce(x)
         return x
 
 class ChannelToSpace(nn.Module):
@@ -56,11 +59,12 @@ class ResidualAttn(nn.Module):
         self.norm = LayerNorm(ch)
         self.attn = Attn(attn_cfg)
         self.layerscale = nn.Parameter(torch.ones(1)*1.0e-6)
+        self.rearrange = Rearrange('b c h w -> b (h w) c')
 
     def forward(self, x):
         res = x.clone()
 
-        x = eo.rearrange(x, 'b c h w -> b (h w) c')
+        x = self.rearrange(x)
         x = self.norm(x)
         x = self.attn(x)
         x = res + self.layerscale * x

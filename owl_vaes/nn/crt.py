@@ -35,8 +35,9 @@ class CRT(nn.Module):
 if __name__ == "__main__":
     import torch
 
-    crt = CRT(768).cuda().bfloat16()
-    x = torch.randn(1,16,768).cuda().bfloat16()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    crt = CRT(768).bfloat16().to(device)
+    x = torch.randn(1,16,768).bfloat16().to(device)
 
     with torch.no_grad():
         print(crt(x))

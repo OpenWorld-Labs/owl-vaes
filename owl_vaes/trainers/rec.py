@@ -2,7 +2,7 @@
 Trainer for reconstruction only
 """
 
-import einops as eo
+from einops.layers.torch import Reduce
 import torch
 import torch.nn.functional as F
 import wandb
@@ -18,11 +18,14 @@ from ..utils import Timer, freeze
 from ..utils.logging import LogHelper, to_wandb
 from .base import BaseTrainer
 
+
+@torch.compile(mode="max-autotune")
 def latent_reg_loss(z):
     # z is [b,c,h,w]
     loss = z.pow(2)
-    loss = eo.reduce(loss, 'b ... -> b', reduction = 'sum').mean()
+    loss = Reduce('b c h w -> b', reduction = 'sum')(loss).mean()
     return 0.5 * loss
+
 
 class RecTrainer(BaseTrainer):
     """
@@ -78,21 +81,25 @@ class RecTrainer(BaseTrainer):
         self.total_step_counter = save_dict['steps']
 
     def train(self):
-        torch.cuda.set_device(self.local_rank)
+        if torch.cuda.is_available():
+            device = torch.device(f'cuda:{self.local_rank}')
+            torch.cuda.set_device(device)
+        else:
+            device = torch.device('cpu')
 
         # Loss weights
-        reg_weight =  self.train_cfg.loss_weights.get('latent_reg', 0.0)
+        reg_weight = self.train_cfg.loss_weights.get('latent_reg', 0.0)
         lpips_weight = self.train_cfg.loss_weights.get('lpips', 0.0)
         se_reg_weight = self.train_cfg.loss_weights.get('se_reg', 0.0)
 
         # Prepare model, lpips, ema
-        self.model = self.model.cuda().train()
+        self.model = self.model.to(device).train()
         if self.world_size > 1:
             self.model = DDP(self.model)
 
         lpips = None
         if lpips_weight > 0.0:
-            lpips = VGGLPIPS().cuda().eval()
+            lpips = VGGLPIPS().to(device).eval()
             freeze(lpips)
 
         self.ema = EMA(
@@ -101,6 +108,11 @@ class RecTrainer(BaseTrainer):
             update_after_step = 0,
             update_every = 1
         )
+
+        # compile all training and frozen models
+        self.model = torch.compile(self.model, mode="max-autotune", fullgraph=True)
+        self.ema = torch.compile(self.ema, mode="max-autotune", fullgraph=True)
+        lpips = torch.compile(lpips, mode="max-autotune", fullgraph=True)
 
         # Set up optimizer and scheduler
         if self.train_cfg.opt.lower() == "muon":
@@ -131,7 +143,7 @@ class RecTrainer(BaseTrainer):
         for _ in range(self.train_cfg.epochs):
             for batch in loader:
                 total_loss = 0.
-                batch = batch.to('cuda').bfloat16()
+                batch = batch.bfloat16().to(device)
 
                 with ctx:
                     out = self.model(batch)
@@ -141,29 +153,31 @@ class RecTrainer(BaseTrainer):
                         batch_rec, z, down_rec = out
 
                 if reg_weight > 0:
-                    reg_loss = latent_reg_loss(z) / accum_steps
-                    total_loss += reg_loss * reg_weight
+                    with ctx:
+                        reg_loss = latent_reg_loss(z) / accum_steps
+                        total_loss += reg_loss * reg_weight
                     metrics.log('reg_loss', reg_loss)
 
                 if se_reg_weight > 0:
-                    with torch.no_grad():
-                        down_batch = F.interpolate(batch, scale_factor=.5, mode = 'bilinear')
-                    se_loss = F.mse_loss(down_rec, down_batch) / accum_steps
-                    if lpips_weight > 0.0:
-                        se_loss += lpips_weight * lpips(down_rec, down_batch) / accum_steps
+                    with ctx:
+                        with torch.no_grad():
+                            down_batch = F.interpolate(batch, scale_factor=.5, mode = 'bilinear')
+                        se_loss = F.mse_loss(down_rec, down_batch) / accum_steps
+                        if lpips_weight > 0.0:
+                            se_loss += lpips_weight * lpips(down_rec, down_batch) / accum_steps
+                        total_loss += se_reg_weight * se_loss
 
-                    total_loss += se_reg_weight * se_loss
                     metrics.log('se_loss', se_loss)
 
-
-                mse_loss = F.mse_loss(batch_rec, batch) / accum_steps
-                total_loss += mse_loss
+                with ctx:
+                    mse_loss = F.mse_loss(batch_rec, batch) / accum_steps
+                    total_loss += mse_loss
                 metrics.log('mse_loss', mse_loss)
 
                 if lpips_weight > 0.0:
                     with ctx:
                         lpips_loss = lpips(batch_rec, batch) / accum_steps
-                    total_loss += lpips_loss
+                        total_loss += lpips_loss
                     metrics.log('lpips_loss', lpips_loss)
 
                 self.scaler.scale(total_loss).backward()
@@ -187,7 +201,9 @@ class RecTrainer(BaseTrainer):
 
                     if self.scheduler is not None:
                         self.scheduler.step()
-                    self.ema.update()
+
+                    with ctx:
+                        self.ema.update()
 
                     # Do logging stuff with sampling stuff in the middle
                     with torch.no_grad():
