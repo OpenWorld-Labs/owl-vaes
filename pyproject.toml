@@ -27,6 +27,7 @@ dependencies = [
     "alias-free-torch>=0.0.6",
     "torchvision>=0.22.0",
     "lpips>=0.1.4",
+    "convnext_perceptual_loss",
 ]
 
 [tool.setuptools.packages.find]
@@ -43,6 +44,15 @@ dev = [
     "skypilot[runpod]>=0.9.3",
 ]
 
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.uv.sources]
 lpips = { git = "https://github.com/shahbuland/PerceptualSimilarity" }
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
+convnext_perceptual_loss = { git = "git+https://github.com/sypsyp97/convnext_perceptual_loss" }
 owl-vae = { workspace = true }

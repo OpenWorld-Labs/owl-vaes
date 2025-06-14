@@ -40,3 +40,13 @@ pre-commit run --all-files
 ## How Do I Set Up A New Config?
 
 - See existing configs under `configs` directory for examples.
+
+## Run with Docker:
+```
+docker build -t owl_vaes .
+
+docker run --gpus all -it \
+  -v $HOME/.gitconfig:/root/.gitconfig:ro \
+  -v $HOME/.ssh:/root/.ssh:ro \
+  owl_vaes /bin/bash
+```

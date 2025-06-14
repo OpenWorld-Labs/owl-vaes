@@ -2,7 +2,7 @@
 Trainer for reconstruction only
 """
 
-import einops as eo
+from einops.layers.torch import Reduce
 import torch
 import torch.nn.functional as F
 import wandb
@@ -20,10 +20,11 @@ from ..utils.logging import LogHelper, to_wandb
 from .base import BaseTrainer
 from ..configs import Config
 
+
 def latent_reg_loss(z):
     # z is [b,c,h,w]
     loss = z.pow(2)
-    loss = eo.reduce(loss, 'b ... -> b', reduction = 'sum').mean()
+    loss = Reduce('b c h w -> b', reduction = 'sum')(loss).mean()
     return 0.5 * loss
 
 class DecTuneTrainer(BaseTrainer):
@@ -108,8 +109,6 @@ class DecTuneTrainer(BaseTrainer):
         self.total_step_counter = save_dict['steps']
 
     def train(self):
-        torch.cuda.set_device(self.local_rank)
-
         # Loss weights
         lpips_weight = self.train_cfg.loss_weights.get('lpips', 0.0)
         gan_weight = self.train_cfg.loss_weights.get('gan', 0.1)
@@ -125,7 +124,7 @@ class DecTuneTrainer(BaseTrainer):
             self.discriminator = DDP(self.discriminator)
         freeze(self.discriminator)
 
-        lpips = None
+        self.lpips = None
         if lpips_weight > 0.0:
             lpips = get_lpips_cls(self.train_cfg.lpips_id)(self.device).to(self.device).eval()
             freeze(lpips)
@@ -143,10 +142,17 @@ class DecTuneTrainer(BaseTrainer):
             update_every = 1
         )
 
+        # compile all training and frozen models
+        self.encoder = torch.compile(self.encoder, mode="max-autotune", fullgraph=True)
+        self.lpips = torch.compile(self.lpips, mode="max-autotune", fullgraph=True)
+        self.model = torch.compile(self.model, mode="max-autotune", fullgraph=True)
+        self.discriminator = torch.compile(self.discriminator, mode="max-autotune", fullgraph=True)
+        self.ema = torch.compile(self.ema, mode="max-autotune", fullgraph=True)
+
         # Set up optimizer and scheduler
         if self.train_cfg.opt.lower() == "muon":
-            self.opt = init_muon(self.model, rank=self.rank,world_size=self.world_size,**self.train_cfg.opt_kwargs)
-            self.d_opt = init_muon(self.discriminator, rank=self.rank,world_size=self.world_size,**self.train_cfg.opt_kwargs)
+            self.opt = init_muon(self.model, rank=self.rank, world_size=self.world_size, **self.train_cfg.opt_kwargs)
+            self.d_opt = init_muon(self.discriminator, rank=self.rank, world_size=self.world_size, **self.train_cfg.opt_kwargs)
         else:
             opt_cls = getattr(torch.optim, self.train_cfg.opt)
             self.opt = opt_cls(self.model.parameters(), **self.train_cfg.opt_kwargs)
@@ -224,14 +230,14 @@ class DecTuneTrainer(BaseTrainer):
                 total_loss = 0.
                 batch = batch.to(self.device).bfloat16()
 
-                with torch.no_grad():
+                with torch.no_grad() and ctx:
                     teacher_z = self.encoder(batch) / self.train_cfg.latent_scale
                     teacher_z = F.interpolate(teacher_z, scale_factor=.5)
                     batch = F.interpolate(batch, scale_factor=.5)
                 with ctx:
                     batch_rec = self.model(teacher_z)
 
-                # Discriminator training 
+                # Discriminator training
                 unfreeze(self.discriminator)
                 with ctx:
                     if r12_weight == 0.0:
@@ -257,22 +263,23 @@ class DecTuneTrainer(BaseTrainer):
                 self.scaler.scale(disc_loss).backward()
                 freeze(self.discriminator)
 
-                mse_loss = F.mse_loss(batch_rec, batch) / accum_steps
-                total_loss += mse_loss
+                with ctx:
+                    mse_loss = F.mse_loss(batch_rec, batch) / accum_steps
+                    total_loss += mse_loss
                 metrics.log('mse_loss', mse_loss)
 
                 if lpips_weight > 0.0:
                     with ctx:
-                        lpips_loss = lpips(batch_rec, batch) / accum_steps
-                    total_loss += lpips_loss
+                        lpips_loss = self.lpips(batch_rec, batch) / accum_steps
+                        total_loss += lpips_loss
                     metrics.log('lpips_loss', lpips_loss)
-                
+
                 crnt_gan_weight = warmup_gan_weight()
                 if crnt_gan_weight > 0.0:
                     with ctx:
                         gan_loss = g_loss(self.discriminator, batch_rec) / accum_steps
-                    metrics.log('gan_loss', gan_loss)
-                    total_loss += crnt_gan_weight * gan_loss
+                        total_loss += crnt_gan_weight * gan_loss
+                metrics.log('gan_loss', gan_loss)
 
                 self.scaler.scale(total_loss).backward()
 
@@ -281,21 +288,21 @@ class DecTuneTrainer(BaseTrainer):
                     # Updates
                     self.scaler.unscale_(self.opt)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
                     self.scaler.unscale_(self.d_opt)
                     torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_norm=1.0)
 
                     self.scaler.step(self.opt)
                     self.opt.zero_grad(set_to_none=True)
-
                     self.scaler.step(self.d_opt)
                     self.d_opt.zero_grad(set_to_none=True)
-                    
+
                     self.scaler.update()
 
                     if self.scheduler is not None:
                         self.scheduler.step()
-                    self.ema.update()
+
+                    with ctx:
+                        self.ema.update()
 
                     # Do logging stuff with sampling stuff in the middle
                     with torch.no_grad():
@@ -307,11 +314,13 @@ class DecTuneTrainer(BaseTrainer):
                         if self.total_step_counter % self.train_cfg.sample_interval == 0:
                             with ctx:
                                 ema_rec = self.ema.ema_model(teacher_z)
+
                             wandb_dict['samples'] = to_wandb(
                                 batch.detach().contiguous().bfloat16(),
                                 ema_rec.detach().contiguous().bfloat16(),
                                 gather = False
                             )
+
                         if self.rank == 0:
                             wandb.log(wandb_dict)
 

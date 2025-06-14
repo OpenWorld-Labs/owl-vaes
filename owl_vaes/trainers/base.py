@@ -25,9 +25,21 @@ class BaseTrainer:
         self.model_cfg = model_cfg
 
         if device is None:
-            device = f'cuda:{local_rank}'
+            if torch.cuda.is_available():
+                device = torch.device(f'cuda:{self.local_rank}')
+            else:
+                device = torch.device('cpu')
+        elif type(device) == str:
+            if device.find(':') != -1:
+                # device is a string of the form "cuda:0"
+                device = torch.device(device)
+            else:
+                device = torch.device(device, self.local_rank)
         self.device = device
-        
+
+        if 'cuda' in self.device.type:
+            torch.cuda.set_device(self.device)
+
         if self.logging_cfg is not None and self.rank == 0:
             log = self.logging_cfg
             wandb.init(
@@ -36,9 +48,6 @@ class BaseTrainer:
                 name=log.run_name,
                 config={"train": train_cfg, "model": model_cfg},
             )
-
-        if 'cuda' in self.device:
-            torch.cuda.set_device(self.local_rank)
 
     def barrier(self):
         if self.world_size > 1:

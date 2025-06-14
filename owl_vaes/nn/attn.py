@@ -1,4 +1,5 @@
 import einops as eo
+from einops.layers.torch import Rearrange
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -17,8 +18,8 @@ class Attn(nn.Module):
 
         self.n_heads = config.n_heads
 
-        self.qkv = nn.Linear(config.d_model, 3 * config.d_model)
-        self.out = nn.Linear(config.d_model, config.d_model)
+        self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
+        self.out = nn.Linear(config.d_model, config.d_model, bias=False)
 
         self.qk_norm = QKNorm(config.d_model // config.n_heads)
 
@@ -26,12 +27,14 @@ class Attn(nn.Module):
             mimetic_init(self.qkv, self.out, config)
         self.causal = config.causal
 
-    def forward(self, x):
+        self.rearrange_qkv = Rearrange('b n (three h d) -> three b h n d', three = 3, h = self.n_heads)
+        self.rearrange_out = Rearrange('b h n d -> b n (h d)')
 
-        q,k,v = eo.rearrange(self.qkv(x), 'b n (three h d) -> three b h n d', three = 3, h = self.n_heads)
+    def forward(self, x):
+        q,k,v = self.rearrange_qkv(self.qkv(x))
         q,k = self.qk_norm(q,k)
         x = F.scaled_dot_product_attention(q,k,v,is_causal=self.causal)
-        x = eo.rearrange(x, 'b h n d -> b n (h d)')
+        x = self.rearrange_out(x)
         x = self.out(x)
         return x
 
@@ -82,11 +85,12 @@ class PatchProjIn(nn.Module):
         super().__init__()
 
         self.proj_in = nn.Conv2d(channels, d_model, patch_size, patch_size, 0, bias=False)
+        self.rearrange = Rearrange('b c h w -> b (h w) c')
 
     def forward(self, x):
         b,c,h,w = x.shape
         x = self.proj_in(x)
-        x = eo.rearrange(x, 'b c h w -> b (h w) c')
+        x = self.rearrange(x)
         return x
 
 class PatchProjOut(nn.Module):
@@ -95,17 +99,18 @@ class PatchProjOut(nn.Module):
 
         self.norm = LayerNorm(d_model)
         self.act = nn.SiLU()
-        self.proj = nn.Linear(d_model, channels*patch_size*patch_size)
+        self.proj = nn.Linear(d_model, channels*patch_size*patch_size, bias=False)
         self.sample_size = sample_size
         self.patch_size = patch_size
 
         self.n_patches = self.sample_size//self.patch_size
+        self.rearrange = Rearrange('b (h w) (ph pw c) -> b c (h ph) (w pw)', h = self.n_patches, ph = self.patch_size, pw = self.patch_size)
 
     def forward(self, x):
         x = self.norm(x)
         x = self.act(x)
         x = self.proj(x)
-        x = eo.rearrange(x, 'b (h w) (ph pw c) -> b c (h ph) (w pw)', h = self.n_patches, ph = self.patch_size, pw = self.patch_size)
+        x = self.rearrange(x)
 
         return x
 
@@ -126,39 +131,40 @@ def attn_test():
         causal = False,
         mimetic_init = False
     )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Test Attention layer
-    attn = Attn(cfg).bfloat16().cuda()
+    attn = Attn(cfg).bfloat16().to(device)
     with torch.no_grad():
-        x = torch.randn(1, 256, 384).bfloat16().cuda()
+        x = torch.randn(1, 256, 384).bfloat16().to(device)
         y = attn(x)
         assert y.shape == (1, 256, 384), f"Expected shape (1,256,384), got {y.shape}"
 
     # Test Transformer layer
-    transformer = Transformer(cfg).bfloat16().cuda()
+    transformer = Transformer(cfg).bfloat16().to(device)
     with torch.no_grad():
-        x = torch.randn(1, 256, 384).bfloat16().cuda()
+        x = torch.randn(1, 256, 384).bfloat16().to(device)
         y = transformer(x)
         assert y.shape == (1, 256, 384), f"Expected shape (1,256,384), got {y.shape}"
 
     # Test StackedTransformer
-    stacked = StackedTransformer(cfg).bfloat16().cuda()
+    stacked = StackedTransformer(cfg).bfloat16().to(device)
     with torch.no_grad():
-        x = torch.randn(1, 256, 384).bfloat16().cuda()
+        x = torch.randn(1, 256, 384).bfloat16().to(device)
         y = stacked(x)
         assert y.shape == (1, 256, 384), f"Expected shape (1,256,384), got {y.shape}"
 
     # Test PatchProjIn
-    patch_in = PatchProjIn(384, 32, 1).bfloat16().cuda()
+    patch_in = PatchProjIn(384, 32, 1).bfloat16().to(device)
     with torch.no_grad():
-        x = torch.randn(1, 32, 16, 16).bfloat16().cuda()
+        x = torch.randn(1, 32, 16, 16).bfloat16().to(device)
         y = patch_in(x)
         assert y.shape == (1, 256, 384), f"Expected shape (1,256,384), got {y.shape}"
 
     # Test PatchProjOut
-    patch_out = PatchProjOut(16, 384, 32, 1).bfloat16().cuda()
+    patch_out = PatchProjOut(16, 384, 32, 1).bfloat16().to(device)
     with torch.no_grad():
-        x = torch.randn(1, 256, 384).bfloat16().cuda()
+        x = torch.randn(1, 256, 384).bfloat16().to(device)
         y = patch_out(x)
         assert y.shape == (1, 32, 16, 16), f"Expected shape (1,32,16,16), got {y.shape}"
 

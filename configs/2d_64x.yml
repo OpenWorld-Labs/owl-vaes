@@ -1,7 +1,7 @@
 # Config for a simple 256 -> 16 autoencoder
 model:
   model_id: dcae
-  sample_size: 256
+  sample_size: [256, 256]
   channels: 3
   latent_size: 4
   latent_channels: 128
